@@ -70,7 +70,7 @@ def plot_invcrf_curves(I_data, B_data):
 
 # --- 실행 부분 ---
 # 'dorfCurves.txt' 파일이 이 코드를 실행하는 디렉토리에 있어야 합니다.
-file_name = 'dorfCurves.txt'
+file_name = '../dataset/dorfCurves.txt'
 if os.path.exists(file_name):
     # 1. 데이터 파싱
     I_data, B_data = parse_dorf_curves(file_name)

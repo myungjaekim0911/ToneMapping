@@ -86,7 +86,7 @@ def plot_emor_crf(E, f0, pca_weights=None):
 
 # --- 실행 ---
 try:
-    E, f0, H = parse_emor_data('emor.txt')
+    E, f0, H = parse_emor_data('../dataset/emorCurves.txt')
     print("EMoR 데이터 파싱 완료.")
     print(f"입력 휘도(E) 샘플 수: {len(E)}")
     print(f"PCA 기저 벡터(H) 수: {H.shape[1]}")
