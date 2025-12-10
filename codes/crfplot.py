@@ -58,9 +58,9 @@ def plot_invcrf_curves(I_data, B_data):
 
     # plt.plot(I_data[0], B_data[0], alpha=0.3) 
         
-    plt.title('Inverse Camera Response Functions (InvCRF)')
-    plt.xlabel('LDR Pixel Value (Normalized)')
-    plt.ylabel('Scene Linear Radiance (Normalized)')
+    plt.title('Camera Response Functions')
+    plt.xlabel('Scene Linear Radiance (Normalized)')
+    plt.ylabel('LDR Pixel Value (Normalized)')
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.xlim(0, 1)
     plt.ylim(0, 1)
