@@ -10,20 +10,17 @@ import glob
 import torch.nn.functional as F
 # 이미지 리사이징을 위해 scikit-image의 resize 함수를 사용합니다.
 from skimage.transform import resize 
+import matplotlib.pyplot as plt
+import sys
 
 # ==============================================================================
-# 0. EMoR 데이터 파싱 및 로드 (사용자 파일 포맷에 맞게 최종 수정)
+# 0. EMoR 데이터 파싱 및 로드 (이전 버전과 동일)
 # ==============================================================================
 
 def parse_emor_data(file_path):
     """
     사용자의 'E =', 'f0 =', 'h(1) =', ..., 'h(25) =' 포맷에 맞게 데이터를 파싱합니다.
     """
-    import os
-    import numpy as np
-    import torch
-    import sys
-
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"오류: EMoR 데이터 파일 '{file_path}'을(를) 찾을 수 없습니다.")
 
@@ -45,7 +42,7 @@ def parse_emor_data(file_path):
         for tag in all_tags:
             if line.startswith(tag):
                 tag_indices[tag] = i + 1
-                break # 한 줄에 여러 태그가 있을 수 없으므로, 찾으면 다음 줄로 이동
+                break
 
     # 2. 필수 태그 27개(E, f0, h(1) ~ h(25))가 모두 있는지 확인합니다.
     if len(tag_indices) != 27:
@@ -58,15 +55,12 @@ def parse_emor_data(file_path):
     def _process_lines(block_lines, count, tag_name=""):
         all_numbers = []
         for line in block_lines:
-            if line: # 빈 줄이 아니면
+            if line:
                 all_numbers.extend(line.split())
 
-        # 문자열 리스트를 float 넘파이 배열로 변환
         data = np.float32(all_numbers[:count])
         
         if data.size < count:
-            print(f"경고: {tag_name} 데이터 크기가 예상치({count})보다 작습니다. 실제 크기: {data.size}", file=sys.stderr)
-            # 데이터가 부족하면 부족한 만큼 0으로 채워서 반환 (학습 진행을 위해)
             padded_data = np.zeros(count, dtype=np.float32)
             padded_data[:data.size] = data
             return padded_data
@@ -90,7 +84,6 @@ def parse_emor_data(file_path):
     for k in range(25):
         current_tag = h_tags[k]
         
-        # 다음 태그의 시작 인덱스를 찾습니다. (k=24일 때는 파일 끝 사용)
         if k < 24:
             next_tag = h_tags[k+1]
             H_end_idx = tag_indices[next_tag] - 1
@@ -99,19 +92,16 @@ def parse_emor_data(file_path):
             
         H_start_idx = tag_indices[current_tag]
         
-        # h(k) 데이터 (1000개 샘플) 추출
         h_k = _process_lines(lines[H_start_idx:H_end_idx], 1000, tag_name=current_tag)
         H_components.append(h_k)
         
-    # 25개의 (1000,) 벡터를 (1000, 25) 행렬로 결합 (25개의 열)
     H = np.stack(H_components, axis=1) 
     print(f"H 행렬 (PCA Basis) 파싱 완료. 크기: {H.shape}")
 
-    # 6. Tensor 반환
     return torch.from_numpy(E).float(), torch.from_numpy(f0).float(), torch.from_numpy(H).float()
 
 # ==============================================================================
-# 1. 미분 가능한 TMO Layer (CRF Reconstruction)
+# 1. 미분 가능한 TMO Layer (CRF Reconstruction) - 이전 버전과 동일
 # ==============================================================================
 
 class DifferentiableTMO(nn.Module):
@@ -122,31 +112,18 @@ class DifferentiableTMO(nn.Module):
         self.register_buffer('H_basis', H_basis)     # (1000, 25)
 
     def forward(self, hdr_image, weights_w):
-        # hdr_image: [B, 3, H, W] (원본 고해상도 HDR RGB)
-        # weights_w: [B, 25] (PCA 가중치)
         
         B, C, H, W = hdr_image.shape
         
         # 1. CRF 곡선 생성 (CRF = f0 + H * w)
-        # H_basis: [1000, 25]
-        # weights_w.T: [25, B]
-        # Matmul 결과: [1000, B]. Transpose하여 [B, 1000]
         curve_delta = torch.matmul(self.H_basis, weights_w.T).T 
-        
-        # [B, 1000] + [1000] (f0_mean) -> 브로드캐스트
         CRF_curve = self.f0_mean + curve_delta # [B, 1000]
         
         # 2. 픽셀 매핑 (보간)
         sdr_output = torch.zeros_like(hdr_image)
         
-        # 각 배치 및 채널에 대해 CRF 보간 적용
         for i in range(B):
             for c in range(C):
-                # (PLACEHOLDER: Differentiable Interpolation Logic)
-                # **주의**: 이 부분은 np.interp를 사용하여 미분 불가능하며, 
-                # 학습 시 경고가 발생합니다. 실제로는 PyTorch의 Differentiable 
-                # Look-Up Table (LUT) 또는 Autograd Function으로 대체되어야 합니다.
-                
                 sdr_output[i, c, :, :] = self._interp_placeholder(
                     hdr_image[i, c, :, :],   # X_in: HDR 픽셀 값
                     self.E_samples,          # X_points: EMoR E samples
@@ -156,13 +133,7 @@ class DifferentiableTMO(nn.Module):
         return torch.clamp(sdr_output, 0.0, 1.0)
     
     def _interp_placeholder(self, x_in, x_points, y_points):
-        # np.interp는 미분 그래프를 끊으므로, detach() 후 numpy 연산 수행
-        # 학습을 위한 개념 코드이므로 이대로 진행합니다.
-        
-        # TMO 적용 전 전역 스케일링 (Log-Avg Luminance 기반)이 필요하지만, 
-        # 이는 TMO 알고리즘의 일부이므로, 여기서는 EMoR의 E_samples에 이미 
-        # 정규화된 값이 입력된다고 가정하고 진행합니다. (Mean EMoR TMO 로직 생략)
-        
+        # 경고를 발생시키는 미분 불가능한 np.interp 사용
         return torch.from_numpy(np.interp(x_in.detach().cpu().numpy(), 
                                           x_points.detach().cpu().numpy(), 
                                           y_points.detach().cpu().numpy()
@@ -170,7 +141,7 @@ class DifferentiableTMO(nn.Module):
 
 
 # ==============================================================================
-# 2. ResNet 기반 PCA Weight Predictor
+# 2. ResNet 기반 PCA Weight Predictor - 이전 버전과 동일
 # ==============================================================================
 
 class ResNetEMoR(nn.Module):
@@ -178,28 +149,20 @@ class ResNetEMoR(nn.Module):
         super().__init__()
         
         self.resnet = resnet18(weights=None)
-        
-        # 입력 채널 변경 (Luminance 1채널)
         self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
         
-        # 최종 FC 레이어 변경 (512 -> 25 weights)
         num_ftrs = self.resnet.fc.in_features
         self.resnet.fc = nn.Linear(num_ftrs, output_weights)
         
-        # Differentiable TMO Layer
         self.tmo_layer = DifferentiableTMO(E_samples, f0_mean, H_basis)
 
     def forward(self, hdr_luminance_input, hdr_rgb_full):
-        # 1. PCA Weights 예측 (ResNet)
         weights_w = self.resnet(hdr_luminance_input) # [B, 25]
-        
-        # 2. CRF/TMO 재구성
         sdr_output = self.tmo_layer(hdr_rgb_full, weights_w) # [B, 3, H, W]
-        
         return sdr_output, weights_w
 
 # ==============================================================================
-# 3. 데이터셋 및 전처리 (사용자 파일 구조 반영)
+# 3. 데이터셋 및 전처리 - 이전 버전과 동일
 # ==============================================================================
 
 class HDRLDRDataset(Dataset):
@@ -209,7 +172,6 @@ class HDRLDRDataset(Dataset):
         self.target_size = target_size
         self.full_size = full_size
         
-        # HDR 파일 목록에서 번호 추출 (e.g., '001', '002', ...)
         hdr_files = sorted(glob.glob(os.path.join(self.hdr_dir, 'HDR_*.hdr')))
         self.file_indices = [os.path.basename(f).split('_')[1].split('.')[0] for f in hdr_files]
         
@@ -223,53 +185,179 @@ class HDRLDRDataset(Dataset):
     def __getitem__(self, idx):
         file_index = self.file_indices[idx]
         
-        # 사용자 구조에 따른 파일 경로
         hdr_path = os.path.join(self.hdr_dir, f'HDR_{file_index}.hdr')
-        ldr_path = os.path.join(self.ldr_dir, f'LDR_{file_index}.jpg') # LDR_exposure_0 폴더 내 LDR_XXX.jpg
+        ldr_path = os.path.join(self.ldr_dir, f'LDR_{file_index}.jpg')
         
-        # 1. 원본 HDR 로드 (1024x1024, float)
         hdr_rgb_full = iio.imread(hdr_path).astype(np.float32)
-        # LDR Ground Truth 로드 (0~1.0 float)
         ldr_gt_full = iio.imread(ldr_path).astype(np.float32) / 255.0
         
-        # 2. ResNet 입력용 HDR 휘도 전처리
-        # a) 휘도 추출 (Luminance)
+        # 휘도 추출 및 다운샘플링
         L_hdr_full = 0.2126 * hdr_rgb_full[..., 0] + 0.7152 * hdr_rgb_full[..., 1] + 0.0722 * hdr_rgb_full[..., 2]
-        
-        # b) 다운샘플링 (1024x1024 -> 256x256)
-        # skimage.transform.resize 사용 (고품질 리사이징)
         L_hdr_downsampled = resize(L_hdr_full, self.target_size, 
                                    anti_aliasing=True, preserve_range=True).astype(np.float32)
         
-        # c) 로그 변환 및 정규화 (log(L+eps))
+        # 로그 변환 및 정규화
         L_hdr_input = np.log(L_hdr_downsampled + 1e-5)
-        # 데이터셋 전체 평균/표준편차로 정규화하는 것이 좋으나, 여기서는 이미지별 정규화 적용
         L_hdr_input = (L_hdr_input - L_hdr_input.mean()) / (L_hdr_input.std() + 1e-5)
         
-        # Tensor 변환
-        L_hdr_input = torch.from_numpy(L_hdr_input).unsqueeze(0) # [1, H', W']
-        hdr_rgb_full_tensor = torch.from_numpy(hdr_rgb_full).permute(2, 0, 1) # [3, H, W]
-        ldr_gt_full_tensor = torch.from_numpy(ldr_gt_full).permute(2, 0, 1) # [3, H, W]
+        L_hdr_input = torch.from_numpy(L_hdr_input).unsqueeze(0)
+        hdr_rgb_full_tensor = torch.from_numpy(hdr_rgb_full).permute(2, 0, 1)
+        ldr_gt_full_tensor = torch.from_numpy(ldr_gt_full).permute(2, 0, 1)
         
         return L_hdr_input.float(), hdr_rgb_full_tensor.float(), ldr_gt_full_tensor.float()
 
 
 # ==============================================================================
-# 4. 학습 설정 및 실행
+# 5. 평가 지표 함수 (TMQI Proxy)
 # ==============================================================================
 
-# 🚨 사용자 지정 필수 1 🚨: LDR-HDR-pair_Dataset 폴더의 상위 경로를 지정해주세요.
-DATASET_ROOT = os.path.expanduser('~/TM/') 
+def calculate_tmqi_proxy(sdr_pred, ldr_gt_full):
+    """
+    TMQI의 구조적 품질(S)을 근사하기 위해 로그 휘도 도메인에서 MSE를 사용하여
+    TMQI 프록시 점수를 계산합니다. (점수는 0~1, 1이 최적)
+    """
+    
+    def get_luminance(img_tensor): # [B, 3, H, W]
+        # Rec. 709 휘도 공식: 0.2126R + 0.7152G + 0.0722B
+        R, G, B = img_tensor.unbind(1)
+        L = 0.2126 * R + 0.7152 * G + 0.0722 * B
+        return L.unsqueeze(1) # [B, 1, H, W]
 
-# 🚨 사용자 지정 필수 2 🚨: EMoR 데이터 파일의 절대 경로를 지정해주세요.
-# 예시: EMOR_DATA_PATH = os.path.expanduser('/home/user/data/emorCurves.txt')
-# 현재 코드가 있는 위치를 기준으로 상대 경로를 추정하는 코드입니다.
+    L_pred = get_luminance(sdr_pred)
+    L_gt = get_luminance(ldr_gt_full)
+    
+    eps = 1e-5
+    
+    # 로그 변환
+    Log_L_pred = torch.log(L_pred + eps)
+    Log_L_gt = torch.log(L_gt + eps)
+    
+    # 구조적 손실(MSE)
+    loss_S = F.mse_loss(Log_L_pred, Log_L_gt)
+    
+    # TMQI 스코어 변환: Score = exp(-k * Loss) (점수를 0~1 범위로 매핑)
+    # k=10을 사용하여 작은 손실을 점수로 변환
+    S_score = torch.exp(-10 * loss_S) 
+    
+    # Naturalness (N) component는 복잡하므로 생략하고 S_score만 반환
+    return S_score.mean().item()
+
+
+def evaluate_model(model, val_loader, device, val_size):
+    model.eval()
+    val_loss = 0.0
+    val_tmqi_total = 0.0
+    
+    with torch.no_grad():
+        for L_hdr_input, hdr_rgb_full, ldr_gt_full in val_loader:
+            L_hdr_input, hdr_rgb_full, ldr_gt_full = L_hdr_input.to(device), hdr_rgb_full.to(device), ldr_gt_full.to(device)
+            
+            sdr_pred, weights_w = model(L_hdr_input, hdr_rgb_full)
+            
+            loss_recon = nn.L1Loss()(sdr_pred, ldr_gt_full)
+            val_loss += loss_recon.item() * L_hdr_input.size(0)
+            
+            # TMQI 계산
+            val_tmqi_total += calculate_tmqi_proxy(sdr_pred, ldr_gt_full) * L_hdr_input.size(0)
+
+    avg_val_loss = val_loss / val_size
+    avg_val_tmqi = val_tmqi_total / val_size
+    print(f"  Validation L1 Loss: {avg_val_loss:.6f}, TMQI Score: {avg_val_tmqi:.6f}")
+    
+    model.train()
+    return avg_val_loss, avg_val_tmqi
+
+# ==============================================================================
+# 6. 학습된 EMoR Curve 및 지표 추이 시각화 함수 (수정됨)
+# ==============================================================================
+
+def plot_results(model, val_loader, E_samples, f0_mean, H_basis, device, loss_history, tmqi_history):
+    """
+    1. 학습된 EMoR Curve를 시각화합니다.
+    2. 학습/검증 지표(L1 Loss, TMQI) 추이를 시각화합니다.
+    """
+    # ------------------ 1. EMoR Curve 시각화 ------------------
+    model.eval()
+    L_hdr_input, hdr_rgb_full, _ = next(iter(val_loader))
+    L_hdr_input, hdr_rgb_full = L_hdr_input.to(device), hdr_rgb_full.to(device)
+    
+    with torch.no_grad():
+        _, weights_w = model(L_hdr_input[0].unsqueeze(0), hdr_rgb_full[0].unsqueeze(0)) 
+
+    w_vector = weights_w.squeeze(0).cpu().numpy()
+    E_numpy = E_samples.cpu().numpy()
+    f0_numpy = f0_mean.cpu().numpy()
+    H_numpy = H_basis.cpu().numpy()
+
+    curve_residual = H_numpy.dot(w_vector)
+    final_crf_curve = f0_numpy + curve_residual
+
+    plt.figure(figsize=(18, 6))
+    
+    # 1-1. EMoR Curve
+    plt.subplot(1, 2, 1)
+    plt.plot(E_numpy, final_crf_curve, label='Learned Tone Mapping Curve', color='red', linewidth=3)
+    plt.plot(E_numpy, f0_numpy, '--', label='EMoR Mean Curve ($\mathbf{f}_0$)', color='gray', alpha=0.7)
+    plt.xlabel('Scene Linear Radiance')
+    plt.ylabel('LDR Pixel Value')
+    plt.title('Learned EMoR Tone Mapping Curve (from a Single Validation Image)')
+    plt.grid(True)
+    plt.legend()
+    
+    # ------------------ 2. 지표 추이 시각화 ------------------
+    epochs = range(1, len(loss_history) + 1)
+    
+    # 1-2. Loss 및 TMQI 추이
+    plt.subplot(1, 2, 2)
+    
+    # Loss Plot
+    line1, = plt.plot(epochs, loss_history, 
+                      label='Validation L1 Loss (Minimize)', # <--- 라벨 수정
+                      color='blue', marker='o', linestyle='-')
+    
+    # TMQI Plot (TMQI는 값이 클수록 좋으므로 오른쪽 Y축 사용)
+    ax2 = plt.gca().twinx()
+    line2, = ax2.plot(epochs, tmqi_history, 
+                       label='Validation TMQI Score (Maximize)', # <--- 라벨 수정
+                       color='green', marker='x', linestyle='--')
+    
+    plt.xlabel('Epoch')
+    
+    # Y축 라벨은 그대로 유지 (ax2의 중복 라벨 설정은 제거)
+    plt.ylabel('Validation L1 Loss (Minimize)', color='blue')
+    ax2.set_ylabel('Validation TMQI Score (Maximize)', color='green') # ax2에 대한 라벨만 설정
+
+    plt.title('Validation Metrics Over Epochs')
+    plt.grid(True, linestyle=':', alpha=0.6)
+    
+    # === 통합된 범례 생성 및 오른쪽 위에 위치시키기 ===
+    # 두 플롯 객체(line1, line2)와 라벨을 통합하여 하나의 범례를 생성
+    lines = [line1, line2]
+    labels = [l.get_label() for l in lines]
+    
+    # 오른쪽 상단에 통합 범례 표시
+    plt.legend(lines, labels, loc='upper right') 
+    
+    # 기존의 분리된 범례 호출은 제거합니다.
+    # plt.legend(loc='upper left') 
+    # ax2.legend(loc='upper right')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    model.train()
+
+# ==============================================================================
+# 4. 학습 설정 및 실행 (수정됨)
+# ==============================================================================
+
+# 🚨 사용자 지정 필수 🚨: LDR-HDR-pair_Dataset 폴더의 상위 경로와 EMoR 파일 경로를 확인해주세요.
+DATASET_ROOT = os.path.expanduser('~/TM/') 
 EMOR_DATA_PATH = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)) if '__file__' in locals() else os.getcwd(), '../dataset/emorCurves.txt'))
 
 def train_model():
-    # 데이터 경로 자동 구성
     HDR_DIR = os.path.join(DATASET_ROOT, 'LDR-HDR-pair_Dataset', 'HDR')
-    LDR_DIR = os.path.join(DATASET_ROOT, 'LDR-HDR-pair_Dataset', 'LDR_exposure_0') # 사용자 구조 반영
+    LDR_DIR = os.path.join(DATASET_ROOT, 'LDR-HDR-pair_Dataset', 'LDR_exposure_0')
     
     print(f"--- 데이터 경로 확인 ---")
     print(f"HDR 디렉토리: {HDR_DIR}")
@@ -277,7 +365,6 @@ def train_model():
     print(f"EMoR 파일: {EMOR_DATA_PATH}")
     print(f"------------------------")
     
-    # GPU 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"사용 장치: {device}")
     
@@ -308,10 +395,14 @@ def train_model():
     
     # 4. 손실 함수 및 최적화
     criterion_recon = nn.L1Loss() 
-    optimizer = optim.Adam(model.parameters(), lr=1e-5)
-    lambda_reg = 1e-5 # PCA Weight L2 정규화 가중치
+    optimizer = optim.Adam(model.parameters(), lr=1e-6)
+    lambda_reg = 1e-5
+    
+    # 5. 지표 저장 리스트
+    val_loss_history = []
+    val_tmqi_history = []
 
-    # 5. 학습 루프
+    # 6. 학습 루프
     num_epochs = 50
     for epoch in range(num_epochs):
         model.train()
@@ -324,10 +415,7 @@ def train_model():
             
             sdr_pred, weights_w = model(L_hdr_input, hdr_rgb_full)
             
-            # L1 재구성 손실
             loss_recon = criterion_recon(sdr_pred, ldr_gt_full)
-            
-            # L2 Weight 정규화 손실
             loss_reg = torch.mean(weights_w.pow(2))
             
             loss = loss_recon + lambda_reg * loss_reg
@@ -340,37 +428,15 @@ def train_model():
         epoch_loss = running_loss / train_size
         print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {epoch_loss:.6f} (Recon: {loss_recon.item():.6f}, Reg: {loss_reg.item():.6f})")
         
-        # 6. 검증
-        evaluate_model(model, val_loader, device, val_size)
+        # 7. 검증 및 지표 저장
+        avg_val_loss, avg_val_tmqi = evaluate_model(model, val_loader, device, val_size)
+        val_loss_history.append(avg_val_loss)
+        val_tmqi_history.append(avg_val_tmqi)
 
+    # 8. 학습 완료 후, EMoR Curve 및 지표 추이 시각화
+    print("\n--- 학습 완료. EMoR Curve 및 지표 추이 시각화를 시작합니다 ---")
+    plot_results(model, val_loader, E_samples, f0_mean, H_basis, device, val_loss_history, val_tmqi_history)
 
-# ==============================================================================
-# 5. 평가 함수 (TMQI Placeholder)
-# ==============================================================================
-
-def evaluate_model(model, val_loader, device, val_size):
-    model.eval()
-    val_loss = 0.0
-    # TMQI PLACEHOLDER: tmqi_scores는 현재 계산되지 않습니다.
-    
-    with torch.no_grad():
-        for L_hdr_input, hdr_rgb_full, ldr_gt_full in val_loader:
-            L_hdr_input, hdr_rgb_full, ldr_gt_full = L_hdr_input.to(device), hdr_rgb_full.to(device), ldr_gt_full.to(device)
-            
-            sdr_pred, weights_w = model(L_hdr_input, hdr_rgb_full)
-            
-            loss_recon = nn.L1Loss()(sdr_pred, ldr_gt_full)
-            val_loss += loss_recon.item() * L_hdr_input.size(0)
-            
-            # ------------------------------------------------------------------
-            # TMQI 계산 로직이 들어갈 자리 (현재는 L1 Loss만 측정)
-            # tmqi_score = calculate_tmqi(hdr_rgb_full, sdr_pred) 
-            # ------------------------------------------------------------------
-
-    avg_val_loss = val_loss / val_size
-    print(f"  Validation L1 Loss: {avg_val_loss:.6f} (TMQI 미측정)")
-    
-    model.train()
 
 if __name__ == '__main__':
     train_model()
